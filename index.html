@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Interior Press: KDP paperback formatter</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mammoth@1.6.0/mammoth.browser.min.js"></script>
+<style>
+:root{--bg:#e9eef2;--paper:#fff;--ink:#16202e;--mute:#5b6878;--line:#c9d2dc;--acc:#1f4fd8;--acc-ink:#fff}
+@media (prefers-color-scheme:dark){:root{--bg:#10151c;--paper:#18202b;--ink:#e8edf3;--mute:#9aa7b6;--line:#2c3746;--acc:#6f95ff;--acc-ink:#0b1220}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:640px;margin:0 auto;padding:40px 20px 64px}
+h1{font:700 2.1rem/1.15 Georgia,"Times New Roman",serif;margin:0 0 8px}
+.lede{color:var(--mute);margin:0 0 28px}
+form{background:var(--paper);border:1px solid var(--line);border-radius:10px;padding:22px}
+label{display:block;font-weight:600;font-size:.9rem;margin:0 0 14px}
+input,select{display:block;width:100%;margin-top:5px;padding:10px;font:inherit;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:6px}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:0 14px}
+#drop{display:block;border:2px dashed var(--line);border-radius:8px;padding:22px;text-align:center;color:var(--mute);cursor:pointer;margin-bottom:18px}
+#drop.has{border-color:var(--acc);color:var(--ink)}
+#drop input{display:none}
+button{width:100%;padding:13px;font:600 1rem system-ui;background:var(--acc);color:var(--acc-ink);border:0;border-radius:6px;cursor:pointer}
+button:disabled{opacity:.5;cursor:wait}
+:focus-visible{outline:3px solid var(--acc);outline-offset:2px}
+#res{margin-top:22px;padding:18px;border-left:4px solid var(--acc);background:var(--paper);border-radius:0 8px 8px 0}
+#res[hidden]{display:none}
+#res.err{border-color:#c0392b}
+#res ul{margin:8px 0 0;padding-left:20px;color:var(--mute)}
+.small{font-size:.85rem;color:var(--mute);margin-top:22px}
+</style>
+</head>
+<body>
+<main>
+<h1>Turn your manuscript into a KDP-ready interior</h1>
+<p class="lede">Upload a Word file or plain text. You get a print PDF with the right trim size, gutter margins, chapter openings and page numbers. Your file never leaves your browser.</p>
+<form id="f">
+<label id="drop"><span id="dtxt">Choose a .docx, .txt or .md manuscript</span><input type="file" id="file" accept=".docx,.txt,.md"></label>
+<div class="row">
+<label>Book title<input id="title" required></label>
+<label>Author name<input id="author" required></label>
+</div>
+<div class="row">
+<label>Trim size
+<select id="trim"><option value="5,8">5 × 8 in</option><option value="5.25,8">5.25 × 8 in</option><option value="5.5,8.5" selected>5.5 × 8.5 in</option><option value="6,9">6 × 9 in</option></select></label>
+<label>Body text size
+<select id="fs"><option>10.5</option><option selected>11</option><option>12</option></select></label>
+</div>
+<label>Copyright year<input id="year" type="number" min="1900" max="2100"></label>
+<button id="go" type="submit">Format my book</button>
+</form>
+<div id="res" hidden></div>
+<p class="small">Headings are found from Word Heading styles, lines starting with “#”, and lines such as “Chapter 3” or “Prologue”. Scene breaks are lines of “***”, “* * *” or “#”. This version sets plain text: italics and bold from your manuscript are not carried over yet.</p>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+$('year').value=new Date().getFullYear();
+$('file').onchange=e=>{const f=e.target.files[0];$('dtxt').textContent=f?f.name:'Choose a .docx, .txt or .md manuscript';$('drop').classList.toggle('has',!!f)};
+
+function clean(s){
+  return s.replace(/\u00a0/g,' ').replace(/--/g,'\u2014')
+    .replace(/(^|[\s(\[\u2014\u2013-])"/g,'$1\u201c').replace(/"/g,'\u201d')
+    .replace(/(^|[\s(\[\u2014\u2013-])'/g,'$1\u2018').replace(/'/g,'\u2019')
+    .replace(/[^\u0000-\u00ff\u2018\u2019\u201c\u201d\u2013\u2014\u2026\u2022\u20ac\u2122]/g,'').replace(/\s+/g,' ').trim();
+}
+function classify(raw){
+  const s=clean(raw);
+  if(/^(\*\s*){3,}$|^#$|^-{3,}$|^~{3,}$/.test(s)) return {t:'break'};
+  const m=s.match(/^#{1,3}\s+(.*)/); if(m) return {t:'h',x:m[1]};
+  if(s.length<60&&/^(chapter\s+\S+|prologue|epilogue|part\s+(\d+|[ivxlc]+|one|two|three|four|five|six|seven|eight|nine|ten)\b)/i.test(s)) return {t:'h',x:s};
+  return {t:'p',x:s};
+}
+async function parse(f){
+  const out=[];
+  if(/\.docx$/i.test(f.name)){
+    const r=await mammoth.convertToHtml({arrayBuffer:await f.arrayBuffer()});
+    const doc=new DOMParser().parseFromString(r.value,'text/html');
+    [...doc.body.children].forEach(el=>{
+      const t=el.textContent.trim(); if(!t) return;
+      if(/^H[1-3]$/.test(el.tagName)) out.push({t:'h',x:clean(t)}); else out.push(classify(t));
+    });
+  }else{
+    (await f.text()).replace(/\r/g,'').split(/\n\s*\n/).forEach(b=>{b=b.trim().replace(/\s*\n\s*/g,' ');if(b)out.push(classify(b))});
+  }
+  return out;
+}
+const gutterFor=p=>p<=150?.375:p<=300?.5:p<=400?.625:p<=500?.75:p<=600?.875:1;
+
+function build(blocks,o,g){
+  const {jsPDF}=window.jspdf, W=o.w*72, H=o.h*72, fs=o.fs, lh=fs*1.3, out=36, top=54, bot=54, ind=18;
+  const d=new jsPDF({unit:'pt',format:[W,H]});
+  d.setProperties({title:o.title,author:o.author});
+  const skip=new Set(), cache=new Map();
+  let page=1, y=top, started=false, noIndent=true, chapters=0;
+  const rl=()=>page%2?g*72:out, tw=()=>W-out-g*72;
+  const wid=w=>{let v=cache.get(w);if(v===undefined){v=d.getTextWidth(w);cache.set(w,v)}return v};
+  const np=()=>{d.addPage();page++;y=top};
+  const body=()=>{d.setFont('times','normal');d.setFontSize(fs)};
+
+  // Front matter: title page (right), copyright page (left)
+  d.setFont('times','bold');d.setFontSize(26);
+  const tl=d.splitTextToSize(o.title,W-144);
+  d.text(tl,W/2,H*0.32,{align:'center'});
+  d.setFont('times','normal');d.setFontSize(14);
+  d.text(o.author,W/2,H*0.32+tl.length*30+24,{align:'center'});
+  skip.add(1);np();skip.add(2);
+  d.setFontSize(9);
+  d.text(['Copyright \u00a9 '+o.year+' '+o.author,'All rights reserved.','','No part of this book may be reproduced without written permission','from the author, except for brief quotations in a review.'],W/2,H*0.7,{align:'center'});
+  body();
+
+  const start=()=>{ if(!started){started=true;np()} };
+  function chapter(t){
+    if(started) np(); else started=true, np();
+    if(page%2===0){skip.add(page);np()}
+    skip.add(page);chapters++;
+    y=top+108;d.setFont('times','bold');d.setFontSize(fs*1.8);
+    d.splitTextToSize(t,tw()).forEach(l=>{d.text(l,rl()+tw()/2,y,{align:'center'});y+=fs*2.2});
+    y+=fs*2;body();noIndent=true;
+  }
+  function sceneBreak(){
+    start();
+    y+=lh*.5;
+    if(y>H-bot-lh*2){np()}
+    d.text('*   *   *',rl()+tw()/2,y,{align:'center'});
+    y+=lh*1.5;noIndent=true;
+  }
+  function para(s){
+    start();
+    const words=s.split(' '), sp=wid(' '), indent=noIndent?0:ind;
+    const lines=[];let cur=[],w=0,avail=tw()-indent;
+    for(const wd of words){
+      const ww=wid(wd);
+      if(cur.length&&w+sp+ww>avail){lines.push(cur);cur=[wd];w=ww;avail=tw()}
+      else{w+=(cur.length?sp:0)+ww;cur.push(wd)}
+    }
+    lines.push(cur);
+    const n=lines.length;let i=0;
+    while(i<n){
+      const space=Math.floor((H-bot-y)/lh)+1;
+      let k=n-i;
+      if(k>space){k=space;if(n-i-k<2)k=n-i-2}
+      if(k<2&&k<n-i){np();continue}
+      for(let j=i;j<i+k;j++){
+        const first=j===0&&indent>0, x=rl()+(first?ind:0), width=tw()-(first?ind:0), L=lines[j];
+        if(j===n-1||L.length<2){d.text(L.join(' '),x,y)}
+        else{
+          const total=L.reduce((a,b)=>a+wid(b),0), gap=(width-total)/(L.length-1);
+          let cx=x;L.forEach(wd=>{d.text(wd,cx,y);cx+=wid(wd)+gap});
+        }
+        y+=lh;
+      }
+      i+=k;
+    }
+    noIndent=false;
+  }
+  blocks.forEach(b=>b.t==='h'?chapter(b.x):b.t==='break'?sceneBreak():para(b.x));
+  const pages=d.getNumberOfPages();
+  d.setFontSize(fs-1);
+  for(let i=1;i<=pages;i++){ if(!skip.has(i)){d.setPage(i);d.text(String(i),W/2,H-30,{align:'center'})} }
+  return {d,pages,chapters};
+}
+
+$('f').onsubmit=async e=>{
+  e.preventDefault();
+  const res=$('res'),btn=$('go'),f=$('file').files[0];
+  res.hidden=false;res.className='';
+  if(!f){res.className='err';res.textContent='Choose your manuscript file first.';return}
+  btn.disabled=true;btn.textContent='Formatting\u2026';
+  await new Promise(r=>setTimeout(r,30));
+  try{
+    const blocks=await parse(f);
+    if(!blocks.some(b=>b.t==='p'))throw new Error('No text found in that file.');
+    const [w,h]=$('trim').value.split(',').map(Number);
+    const o={w,h,fs:+$('fs').value,title:$('title').value.trim(),author:$('author').value.trim(),year:$('year').value};
+    let g=.5,r=build(blocks,o,g);
+    const g2=gutterFor(r.pages);
+    if(g2!==g){g=g2;r=build(blocks,o,g)}
+    const slug=o.title.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'')||'book';
+    r.d.save(slug+'-kdp-interior.pdf');
+    const notes=[];
+    if(r.pages<24)notes.push('KDP needs at least 24 pages for a paperback. This one has '+r.pages+'.');
+    if(!r.chapters)notes.push('No chapter headings were found, so the text runs on without chapter openings.');
+    res.innerHTML='<strong>Done: '+r.pages+' pages, '+r.chapters+' chapters.</strong><ul><li>Inside (gutter) margin '+g+' in, outside 0.5 in, top and bottom 0.75 in, set for '+r.pages+' pages.</li><li>Chapters open on right-hand pages with page numbers hidden on openers.</li><li>Open the PDF and check a few chapter openings before uploading to KDP.</li>'+notes.map(n=>'<li><strong>'+n+'</strong></li>').join('')+'</ul>';
+  }catch(err){res.className='err';res.textContent='Something went wrong: '+err.message}
+  btn.disabled=false;btn.textContent='Format my book';
+};
+</script>
+</body>
+</html>
