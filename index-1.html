@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Interior Press: KDP paperback formatter</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mammoth@1.6.0/mammoth.browser.min.js"></script>
+<style>
+:root{--bg:#e9eef2;--paper:#fff;--ink:#16202e;--mute:#5b6878;--line:#c9d2dc;--acc:#1f4fd8;--acc-ink:#fff}
+@media (prefers-color-scheme:dark){:root{--bg:#10151c;--paper:#18202b;--ink:#e8edf3;--mute:#9aa7b6;--line:#2c3746;--acc:#6f95ff;--acc-ink:#0b1220}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:640px;margin:0 auto;padding:40px 20px 64px}
+h1{font:700 2.1rem/1.15 Georgia,"Times New Roman",serif;margin:0 0 8px}
+.lede{color:var(--mute);margin:0 0 28px}
+form{background:var(--paper);border:1px solid var(--line);border-radius:10px;padding:22px}
+label{display:block;font-weight:600;font-size:.9rem;margin:0 0 14px}
+input,select{display:block;width:100%;margin-top:5px;padding:10px;font:inherit;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:6px}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:0 14px}
+label.chk{display:flex;gap:10px;align-items:flex-start;font-weight:400}
+label.chk input{width:auto;margin:4px 0 0}
+#drop{display:block;border:2px dashed var(--line);border-radius:8px;padding:22px;text-align:center;color:var(--mute);cursor:pointer;margin-bottom:18px;font-weight:400}
+#drop.has{border-color:var(--acc);color:var(--ink)}
+#drop input{display:none}
+button{width:100%;padding:13px;font:600 1rem system-ui;background:var(--acc);color:var(--acc-ink);border:0;border-radius:6px;cursor:pointer}
+button:disabled{opacity:.5;cursor:wait}
+:focus-visible{outline:3px solid var(--acc);outline-offset:2px}
+#res{margin-top:22px;padding:18px;border-left:4px solid var(--acc);background:var(--paper);border-radius:0 8px 8px 0}
+#res[hidden]{display:none}
+#res.err{border-color:#c0392b}
+#res ul{margin:8px 0 0;padding-left:20px;color:var(--mute)}
+.small{font-size:.85rem;color:var(--mute);margin-top:22px}
+</style>
+</head>
+<body>
+<main>
+<h1>Turn your manuscript into a KDP-ready interior</h1>
+<p class="lede">Upload a Word file or plain text. You get a print PDF with the right trim size, gutter margins, chapter openings, italics, embedded fonts and page numbers. Your manuscript never leaves your browser.</p>
+<form id="f">
+<label id="drop"><span id="dtxt">Choose a .docx, .txt or .md manuscript</span><input type="file" id="file" accept=".docx,.txt,.md"></label>
+<div class="row">
+<label>Book title<input id="title" required></label>
+<label>Author name<input id="author" required></label>
+</div>
+<div class="row">
+<label>Trim size
+<select id="trim"><option value="5,8">5 × 8 in</option><option value="5.25,8">5.25 × 8 in</option><option value="5.5,8.5" selected>5.5 × 8.5 in</option><option value="6,9">6 × 9 in</option></select></label>
+<label>Body text size
+<select id="fs"><option>10.5</option><option>11</option><option selected>11.5</option><option>12</option></select></label>
+</div>
+<label>Copyright year<input id="year" type="number" min="1900" max="2100"></label>
+<label class="chk"><input type="checkbox" id="own" checked><span>My file starts with its own title, contents, copyright or dedication. Use my copyright and dedication text and skip the rest.</span></label>
+<button id="go" type="submit">Format my book</button>
+</form>
+<div id="res" hidden></div>
+<p class="small">Headings are found from Word Heading styles, lines starting with “#”, and lines such as “Chapter 3” or “Prologue”. Scene breaks are lines of “***”, “* * *” or “#”. Italics and bold are kept. The first time you format, the book font downloads (a few seconds).</p>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+$('year').value=new Date().getFullYear();
+$('file').onchange=e=>{const f=e.target.files[0];$('dtxt').textContent=f?f.name:'Choose a .docx, .txt or .md manuscript';$('drop').classList.toggle('has',!!f)};
+
+/* ---------- text helpers ---------- */
+const OK=/[^\u0000-\u00ff\u2018\u2019\u201c\u201d\u2013\u2014\u2026\u2022\u20ac\u2122]/g;
+function seg(s){ // clean one run of text, keep edge spaces
+  return s.replace(/\u00a0/g,' ').replace(/--/g,'\u2014')
+    .replace(/(^|[\s(\[\u2014\u2013-])"/g,'$1\u201c').replace(/"/g,'\u201d')
+    .replace(/(^|[\s(\[\u2014\u2013-])'/g,'$1\u2018').replace(/'/g,'\u2019')
+    .replace(OK,'').replace(/\s+/g,' ');
+}
+function norm(segs){
+  segs=segs.filter(s=>s.x);
+  if(segs.length){segs[0].x=segs[0].x.replace(/^\s+/,'');segs[segs.length-1].x=segs[segs.length-1].x.replace(/\s+$/,'')}
+  return segs.filter(s=>s.x);
+}
+const plain=segs=>segs.map(s=>s.x).join('').trim();
+function classify(segs){
+  segs=norm(segs);const s=plain(segs);
+  if(!s) return null;
+  if(/^(\*\s*){3,}$|^#$|^-{3,}$|^~{3,}$/.test(s)) return {t:'break'};
+  const m=s.match(/^#{1,3}\s+(.*)/); if(m) return {t:'h',x:m[1]};
+  if(s.length<60&&/^(chapter\s+\S+|prologue|epilogue|interlude|part\s+(\d+|[ivxlc]+|one|two|three|four|five|six|seven|eight|nine|ten)\b)/i.test(s)) return {t:'h',x:s};
+  return {t:'p',s:segs,x:s};
+}
+function mdSegs(t){ // *italic* in plain text files
+  const out=[];t.split(/(\*[^*]+\*)/).forEach(p=>{ if(/^\*[^*]+\*$/.test(p)) out.push({x:seg(p.slice(1,-1)),i:1}); else out.push({x:seg(p)}) });
+  return out;
+}
+function walk(node,i,b,out){
+  node.childNodes.forEach(n=>{
+    if(n.nodeType===3) out.push({x:seg(n.textContent),i,b});
+    else if(n.nodeType===1){
+      const t=n.tagName;
+      if(t==='BR') out.push({x:' ',i,b});
+      else walk(n,i||t==='EM'||t==='I',b||t==='STRONG'||t==='B',out);
+    }
+  });
+}
+async function parse(f){
+  const out=[];
+  if(/\.docx$/i.test(f.name)){
+    const r=await mammoth.convertToHtml({arrayBuffer:await f.arrayBuffer()});
+    const doc=new DOMParser().parseFromString(r.value,'text/html');
+    [...doc.body.children].forEach(el=>{
+      if(/^H[1-3]$/.test(el.tagName)){const t=seg(el.textContent).trim();if(t)out.push({t:'h',x:t});return}
+      const segs=[];walk(el,false,false,segs);
+      const b=classify(segs);if(b)out.push(b);
+    });
+  }else{
+    (await f.text()).replace(/\r/g,'').split(/\n\s*\n/).forEach(b=>{b=b.trim().replace(/\s*\n\s*/g,' ');if(!b)return;const c=classify(mdSegs(b));if(c)out.push(c)});
+  }
+  return out;
+}
+function splitFront(blocks,own){
+  let front=null;
+  if(own){
+    const k=blocks.findIndex(b=>b.t==='h');
+    if(k>=0){
+      let rest=blocks.slice(k);
+      if(/copyright/i.test(rest[0].x)){
+        let j=1;while(j<rest.length&&rest[j].t!=='h')j++;
+        const lines=rest.slice(1,j).filter(b=>b.t==='p').map(b=>b.x);
+        const e=lines.findIndex(l=>l.length<60&&/edition/i.test(l));
+        front={copy:e>=0?lines.slice(0,e+1):lines,ded:e>=0?lines.slice(e+1):[]};
+        rest=rest.slice(j);
+      }
+      blocks=rest;
+    }
+  }
+  return {blocks,front};
+}
+
+/* ---------- fonts (embedded in the PDF) ---------- */
+const BASES=['https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/crimsontext/','https://raw.githubusercontent.com/google/fonts/main/ofl/crimsontext/'];
+const FILES={normal:'CrimsonText-Regular.ttf',italic:'CrimsonText-Italic.ttf',bold:'CrimsonText-Bold.ttf',bolditalic:'CrimsonText-BoldItalic.ttf'};
+let fontData=null;
+const b64=buf=>{const a=new Uint8Array(buf);let s='';for(let i=0;i<a.length;i+=0x8000)s+=String.fromCharCode.apply(null,a.subarray(i,i+0x8000));return btoa(s)};
+async function loadFonts(){
+  if(fontData) return fontData;
+  const res={};
+  for(const [st,file] of Object.entries(FILES)){
+    let got=null;
+    for(const base of BASES){try{const r=await fetch(base+file);if(r.ok){got=await r.arrayBuffer();break}}catch(e){}}
+    if(!got) return null;
+    res[st]=b64(got);
+  }
+  return fontData=res;
+}
+
+/* ---------- layout ---------- */
+const gutterFor=p=>p<=150?.375:p<=300?.5:p<=400?.625:p<=500?.75:p<=600?.875:1;
+
+function build(blocks,front,o,g,fonts){
+  const {jsPDF}=window.jspdf, W=o.w*72, H=o.h*72, fs=o.fs, lh=fs*1.3, out=36, top=54, bot=54, ind=18;
+  const d=new jsPDF({unit:'pt',format:[W,H],compress:true});
+  d.setProperties({title:o.title,author:o.author});
+  let fam='times';
+  if(fonts){fam='Crimson';for(const st in FILES){d.addFileToVFS(FILES[st],fonts[st]);d.addFont(FILES[st],fam,st)}}
+  let cs=null;const setF=st=>{if(cs!==st){d.setFont(fam,st);cs=st}};
+  const skip=new Set(), cache=new Map();
+  let page=1, y=top, started=false, noIndent=true, chapters=0;
+  const rl=()=>page%2?g*72:out, tw=()=>W-out-g*72;
+  const pw=p=>{const k=p.st+'|'+p.x;let v=cache.get(k);if(v===undefined){setF(p.st);v=d.getTextWidth(p.x);cache.set(k,v)}return v};
+  const np=()=>{d.addPage();page++;y=top};
+  const body=()=>{setF('normal');d.setFontSize(fs)};
+
+  // Page 1: title
+  setF('bold');d.setFontSize(26);
+  const tl=d.splitTextToSize(o.title,W-144);
+  d.text(tl,W/2,H*0.32,{align:'center'});
+  setF('normal');d.setFontSize(14);
+  d.text(o.author,W/2,H*0.32+tl.length*30+24,{align:'center'});
+  skip.add(1);np();skip.add(2);
+
+  // Page 2: copyright
+  setF('normal');d.setFontSize(9);
+  const copy=front&&front.copy.length?front.copy:['Copyright \u00a9 '+o.year+' '+o.author,'All rights reserved.','No part of this book may be reproduced without written permission from the author, except for brief quotations in a review.'];
+  const wrapped=copy.map(c=>d.splitTextToSize(c,W-144));
+  const hgt=wrapped.reduce((a,l)=>a+l.length*12+8,0);
+  let cy=H-bot-hgt;
+  wrapped.forEach(l=>{d.text(l,W/2,cy,{align:'center'});cy+=l.length*12+8});
+
+  // Page 3: dedication
+  if(front&&front.ded.length){
+    np();skip.add(page);setF('italic');d.setFontSize(fs+1);
+    const dl=front.ded.flatMap(t=>d.splitTextToSize(t,W-180));
+    d.text(dl,W/2,H*0.35,{align:'center',lineHeightFactor:1.6});
+  }
+  body();
+
+  function begin(){ // first text page must be right-hand
+    np();if(page%2===0){skip.add(page);np()}
+  }
+  const start=()=>{if(!started){started=true;begin()}};
+  function chapter(t){
+    if(!started){started=true;begin()}
+    else{np();if(page%2===0){skip.add(page);np()}}
+    skip.add(page);chapters++;
+    y=top+108;setF('bold');d.setFontSize(fs*1.8);
+    d.splitTextToSize(t,tw()).forEach(l=>{d.text(l,rl()+tw()/2,y,{align:'center'});y+=fs*2.2});
+    y+=fs*2;body();noIndent=true;
+  }
+  function sceneBreak(){
+    start();body();
+    y+=lh*.5;
+    if(y>H-bot-lh*2){np()}
+    d.text('*   *   *',rl()+tw()/2,y,{align:'center'});
+    y+=lh*1.5;noIndent=true;
+  }
+  function tokens(segs){
+    const toks=[];let cur=[];
+    const flush=()=>{if(cur.length){toks.push(cur);cur=[]}};
+    for(const s of segs){
+      const st=s.b&&s.i?'bolditalic':s.b?'bold':s.i?'italic':'normal';
+      s.x.split(/(\s+)/).forEach(part=>{if(!part)return;if(/^\s+$/.test(part))flush();else cur.push({x:part,st})});
+    }
+    flush();return toks;
+  }
+  const tokW=t=>t.reduce((a,p)=>a+pw(p),0);
+  function para(segs){
+    start();body();
+    const toks=tokens(segs);if(!toks.length)return;
+    const sp=pw({x:' ',st:'normal'}), indent=noIndent?0:ind;
+    const lines=[];let cur=[],w=0,avail=tw()-indent;
+    for(const t of toks){
+      const ww=tokW(t);
+      if(cur.length&&w+sp+ww>avail){lines.push(cur);cur=[t];w=ww;avail=tw()}
+      else{w+=(cur.length?sp:0)+ww;cur.push(t)}
+    }
+    lines.push(cur);
+    const n=lines.length;let i=0;
+    while(i<n){
+      const space=Math.floor((H-bot-y)/lh)+1;
+      let k=n-i;
+      if(k>space){k=space;if(n-i-k<2)k=n-i-2}
+      if(k<2&&k<n-i){np();continue}
+      for(let j=i;j<i+k;j++){
+        const first=j===0&&indent>0, L=lines[j], width=tw()-(first?ind:0);
+        let cx=rl()+(first?ind:0);
+        let gap=sp;
+        if(j<n-1&&L.length>1) gap=(width-L.reduce((a,t)=>a+tokW(t),0))/(L.length-1);
+        L.forEach(t=>{t.forEach(p=>{setF(p.st);d.text(p.x,cx,y);cx+=pw(p)});cx+=gap});
+        y+=lh;
+      }
+      i+=k;
+    }
+    noIndent=false;
+  }
+  blocks.forEach(b=>b.t==='h'?chapter(b.x):b.t==='break'?sceneBreak():para(b.s));
+  const pages=d.getNumberOfPages();
+  setF('normal');d.setFontSize(fs-1);
+  for(let i=1;i<=pages;i++){ if(!skip.has(i)){d.setPage(i);d.text(String(i),W/2,H-30,{align:'center'})} }
+  return {d,pages,chapters};
+}
+
+$('f').onsubmit=async e=>{
+  e.preventDefault();
+  const res=$('res'),btn=$('go'),f=$('file').files[0];
+  res.hidden=false;res.className='';
+  if(!f){res.className='err';res.textContent='Choose your manuscript file first.';return}
+  btn.disabled=true;btn.textContent='Formatting\u2026';
+  await new Promise(r=>setTimeout(r,30));
+  try{
+    const parsed=await parse(f);
+    if(!parsed.some(b=>b.t==='p'))throw new Error('No text found in that file.');
+    const {blocks,front}=splitFront(parsed,$('own').checked);
+    const fonts=await loadFonts();
+    const [w,h]=$('trim').value.split(',').map(Number);
+    const o={w,h,fs:+$('fs').value,title:$('title').value.trim(),author:$('author').value.trim(),year:$('year').value};
+    let g=.5,r=build(blocks,front,o,g,fonts);
+    const g2=gutterFor(r.pages);
+    if(g2!==g){g=g2;r=build(blocks,front,o,g,fonts)}
+    const slug=o.title.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'')||'book';
+    r.d.save(slug+'-kdp-interior.pdf');
+    const notes=[];
+    if(!fonts)notes.push('The book font could not be downloaded, so a standard font was used and is not embedded. KDP may warn about this. Try again with a stronger connection.');
+    if(r.pages<24)notes.push('KDP needs at least 24 pages for a paperback. This one has '+r.pages+'.');
+    if(!r.chapters)notes.push('No chapter headings were found, so the text runs on without chapter openings.');
+    res.innerHTML='<strong>Done: '+r.pages+' pages, '+r.chapters+' chapters.</strong><ul><li>Inside (gutter) margin '+g+' in, outside 0.5 in, top and bottom 0.75 in, set for '+r.pages+' pages.</li><li>'+(fonts?'Fonts are embedded in the PDF.':'Fonts are not embedded.')+' Chapters open on right-hand pages.</li><li>Open the PDF and check a few chapter openings before uploading to KDP.</li>'+notes.map(n=>'<li><strong>'+n+'</strong></li>').join('')+'</ul>';
+  }catch(err){res.className='err';res.textContent='Something went wrong: '+err.message}
+  btn.disabled=false;btn.textContent='Format my book';
+};
+</script>
+</body>
+</html>
